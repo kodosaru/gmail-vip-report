@@ -26,6 +26,35 @@ function runPython(operation, input, ...args) {
   return JSON.parse(result.stdout);
 }
 
+// Gmail's per-user quota can take a full minute to clear.
+const quotaDelays = [15_000, 30_000, 60_000];
+
+async function retryGmailRequest(request) {
+  for (let retry = 0; ; retry++) {
+    try {
+      return await request();
+    } catch (error) {
+      const response = error.response;
+      const status = response?.status;
+      const apiError = response?.data?.error;
+      const rateLimited = status === 429 || (status === 403 && (
+        apiError?.errors?.some(({ reason }) => reason === 'rateLimitExceeded' || reason === 'userRateLimitExceeded')
+        || apiError?.details?.some(({ reason }) => reason === 'RATE_LIMIT_EXCEEDED')
+        || /quota exceeded.*units per minute/i.test(apiError?.message ?? error.message)
+      ));
+      if (!rateLimited || retry === quotaDelays.length) throw error;
+
+      const retryAfter = response?.headers?.get?.('retry-after') ?? response?.headers?.['retry-after'];
+      const serverDelay = /^\d+$/.test(retryAfter)
+        ? Number(retryAfter) * 1000
+        : Date.parse(retryAfter) - Date.now();
+      if (serverDelay > 120_000) throw error;
+      const delay = Math.max(quotaDelays[retry], serverDelay || 0) + Math.random() * 1000;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 async function connect(reset, mailbox) {
   const { google } = await import('googleapis');
   const { authorizeInBrowser } = await import('./oauth.mjs');
@@ -56,7 +85,7 @@ async function connect(reset, mailbox) {
   const tokens = saved ? { refresh_token: saved.refresh_token } : await authorizeInBrowser(auth, mailbox);
   auth.setCredentials(tokens);
   const gmail = google.gmail({ version: 'v1', auth });
-  const { data } = await gmail.users.getProfile({ userId: 'me' });
+  const { data } = await retryGmailRequest(() => gmail.users.getProfile({ userId: 'me' }));
   if (data.emailAddress?.toLowerCase() !== mailbox) {
     throw new Error(`Sign in as ${mailbox}. To select a different account, run npm.cmd run report -- --reauthorize.`);
   }
@@ -76,9 +105,9 @@ async function listInbox(messages, start, end) {
   const q = `after:${Math.floor(start / 1000) - 1} before:${Math.floor(end / 1000) + 1}`;
   let pageToken;
   do {
-    const { data } = await messages.list({
+    const { data } = await retryGmailRequest(() => messages.list({
       userId: 'me', labelIds: ['INBOX'], q, maxResults: 500, pageToken,
-    });
+    }));
     for (const message of data.messages ?? []) ids.add(message.id);
     pageToken = data.nextPageToken;
     if (pageToken && seen.has(pageToken)) throw new Error('Gmail repeated a page token.');
@@ -109,9 +138,9 @@ export async function buildReport(gmail, { end, workbookPath = workbook, outputF
   const messages = gmail.users.messages;
   const ids = await listInbox(messages, start, end);
   const headers = await mapInBatches(ids, async id => {
-    const { data } = await messages.get({
+    const { data } = await retryGmailRequest(() => messages.get({
       userId: 'me', id, format: 'metadata', metadataHeaders: ['From', 'Subject'],
-    });
+    }));
     if (data.id !== id || !data.internalDate || !data.payload?.headers) {
       throw new Error(`Gmail returned incomplete metadata for message ${id}.`);
     }
@@ -119,7 +148,7 @@ export async function buildReport(gmail, { end, workbookPath = workbook, outputF
   });
   const selected = runPython('select', { start, end, headers }, workbookPath);
   const entries = await mapInBatches(selected, async entry => {
-    const { data } = await messages.get({ userId: 'me', id: entry.id, format: 'raw' });
+    const { data } = await retryGmailRequest(() => messages.get({ userId: 'me', id: entry.id, format: 'raw' }));
     if (data.id !== entry.id || !data.raw) throw new Error(`Gmail returned an incomplete message for ${entry.id}.`);
     const { year, month, day, hour, minute } = easternParts(entry.received);
     return { ...entry, raw: data.raw, date: `${year}-${month}-${day} ${hour}:${minute} ET` };
