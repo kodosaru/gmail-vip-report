@@ -204,6 +204,7 @@ def format_message(entry):
         line for line in lines
         if line.strip() and not (line.startswith("|") and not line[1:].strip()) and not URL.search(line)
         and "notice:" not in line.casefold()
+        and not line.startswith(("<table", ">  "))
     )
 
 
