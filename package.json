@@ -1,0 +1,17 @@
+{
+  "name": "vip-email-report",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "report": "node report.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "googleapis": "189.0.0",
+    "open": "11.0.4"
+  }
+}

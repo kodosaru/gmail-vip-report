@@ -1,0 +1,7 @@
+node_modules/
+__pycache__/
+credentials.json
+token.json
+VIP_Email_*.txt
+/settings.xml
+/README.md
